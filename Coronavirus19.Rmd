@@ -1,0 +1,582 @@
+---
+title: "Coronavirus"
+author: "Roger Vilà"
+date: "23/3/2020"
+output:
+  pdf_document: default
+---
+
+
+```{r, echo = F}
+#0. Opcions generals
+options(scipen=999) #Desactivar la notació cientifica
+setwd("")
+```
+
+## 1. Llibreries
+
+- Tidyverse: per al data cleaning i els plots
+- Readxl: per a llegir excels
+- Lubridate: per al tractament de dates
+- Knitr: per al format del document
+- Ggpmisc: inclou extensions utils per a ggpglot
+- Growthmodels: per a models no lineals de Gompertz
+- Minpack.lm: extensió per a models no lineals
+- Rmarkdown: per a generar informes en foramt Lattex
+
+```{r, include=F}
+library(tidyverse)
+library(readxl)
+library(lubridate)
+library(knitr)
+library(ggpmisc)
+library(growthmodels)
+library(minpack.lm)
+library(rmarkdown)
+tinytex::install_tinytex()
+```
+
+## 2. Carregar dades
+
+- Font: https://www.ecdc.europa.eu/en/publications-data/download-todays-data-geographic-distribution-covid-19-cases-worldwide
+- Actualització: 23/03/2020 10:35
+
+```{r, echo = F}
+data_raw <- read_excel("COVID-19-geographic-disbtribution-worldwide-2020-03-22.xlsx")
+```
+
+## 3. Preparació dades
+ - Transformació de tipus i noms de variables
+ - Acumulat d'infectats
+ 
+```{r, echo = F}
+data <- data_raw%>%
+  mutate(
+    Data = as_date(DateRep),
+    Pais = as_factor(`Countries and territories`),
+    Infect_Nou = Cases,
+    Morts_Nou = Deaths
+  )
+```
+249 observacions fins a la data
+
+
+```{r, echo=F}
+data%>%
+  filter(Pais=="China")%>%
+  ggplot(aes(x=factor(Data),y=Infect_Nou,color=Pais))+
+  geom_col(aes(fill=Pais))+
+  theme(axis.text.x = element_text(angle = 90,
+                                   size = 5))
+```
+
+S'observen dos pics els dies 13 i 14 de febrer; es tracta de punts que no segueixen la tendència i inclús sobresurten de forma exagerada. Aquests punts es tracten com a outliers. 
+
+```{r, echo= F}
+# Els outliers es substitueix per 0 (per tal de no afectar la funció cumsum)
+outliers <- as_date(c('2020-02-13','2020-02-14'))
+data[data$Pais=="China" & data$Data %in% outliers, c("Infect_Nou","Morts_Nou")] = 0
+```
+
+```{r, echo= F}
+#Es creen noves variables de dades acumulades
+data<-data%>%
+  select(Pais,Data,Infect_Nou,Morts_Nou)%>%
+  arrange(Pais,Data)%>%
+  group_by(Pais)%>%
+  mutate(Infect_acu = cumsum(Infect_Nou),
+         Morts_acu  = cumsum(Morts_Nou),
+         Infect_rati = Infect_acu/lag(Infect_acu)
+           )%>%
+  arrange(Pais,Data)%>%
+  ungroup()
+```
+
+
+## 3. Analisis Exploratori Inicial
+```{r, include= F}
+summary(data)
+str(data)
+```
+Han passat 83 dies des de la primera dada contabilitzada el dia d'any nou a Xina (31/12/2019)
+
+```{r, results='asis', echo= F}
+data%>%
+  group_by(Pais)%>%
+  summarize(Infectats=sum(Infect_Nou))%>%
+  arrange(desc(Infectats))%>%
+  head(10)%>%
+  kable()
+```
+
+A dia 23/03 Espanya és el quart país en número d'infectats per darrere només de Xina, Italia i els EEUU.
+
+```{r, results='asis', echo= F}
+data%>%
+  group_by(Pais)%>%
+  summarize(Morts=sum(Morts_Nou))%>%
+  arrange(desc(Morts))%>%
+  head(10)%>%
+  kable()
+```
+
+Espanya és, també, el quart en número de morts per darrere de Italia, Xina i Iran. 
+
+## 4. Què podem dir del nombre d'infectats? 
+Italia, Xina i Espanya són, de moment, els paisos més afectats pel COVID-19. 
+
+El model epidemiologic prediu que el creixement d'una epidemia és exponencial fins que assoleix un màxim i aleshores decau. El acumulat d'infectats passa de tenir una forma exponencial a sigmoidal. Finalment, s'entra en una fase de recuperació i la curva decau. https://es.wikipedia.org/wiki/Modelaje_matem%C3%A1tico_de_epidemias 
+
+Les noticies anuncien que Xina ja ha superat la crisis. Des del dia 22/03 (dos mesos despres de les primeres mesures adoptades) les mesures de confinament es comencen a relaxar al pais asiatic. Vol dir això que ha superat la fase exponencial? Mirarem d'aprendre per què?
+
+- Començarem filtrant per aquests tres paisos i també per Corea del Sud ja que és un cas paradigmatic
+- Plotejarem el nombre d'acumulats per veure si te un creixement exponencial
+
+```{r, echo=F}
+paisos_filt <- c("Spain","Italy","China","South_Korea")
+data_filt <- data%>%
+  filter(Pais %in% paisos_filt)
+```
+
+Començarem per veure l'evolució dels infectats
+```{r, results='asis', echo= F}
+data_filt %>%
+  ggplot(aes(x=factor(Data),y=Infect_acu,color=Pais))+
+  geom_point()+
+  theme(axis.text.x = element_text(angle = 90,
+                                   size = 5))
+```
+
+
+Observacions:
+
+- Sembla que Xina ja ha superat la fase de creixement exponencial i s'estabilitza en forma de sigmoide. Mirarem l'evolució de nous casos de contagi.
+- S'observa que tant Itàlia com Espanya encara es troben en una fase de creixement exponencial.
+- Significatiu el cas de Corea del Sud: ha tingut un baix creixement exponencial i sembla estar ja en fase d'estabilització.
+- Els primers casos de coronavirus a Espanya apareixen 10-11 dies mes tard que a Italia. Podem esperar que, si evoluciona igual, les mesures s'allarguin 10-11 dies respecte a Itàlia?
+- Des del 11-03-2020, Espanya canvia el criteri de tests i només es realitza a qui presenti quadres clínics aguts. Les dades no comptabilitzen casos amb síntomes lleus de coronavirus. No obstant, aquest fet no es pot veure als gràfics
+
+```{r, results='asis', echo= F}
+data_filt %>%
+  ggplot(aes(x=factor(Data),y=Infect_Nou))+
+  geom_col(aes(fill=Pais))+
+  facet_wrap(~Pais)+
+  theme(axis.text.x = element_text(angle = 90,
+                                   size = 5))
+
+```
+
+- A la Xina, el número de nous infectats augmenta continuament fins al dia 05/02/2020 on assoleix un màxim de 3872 nous infectats. Posteriorment, la tendència és decreixent. Sembla doncs que, efectivament la Xina ha superat la fase de creixement de nous infectats i ara passarà a una fase d'estabilització
+
+- Amb les mesures preses pel govern xinés s'aconsegueix que la fase de creixement exponencial duri dues setmanaes (del 22/01/2020 a 05/02/2020), però no és fins dos mesos desprès (22/03/2020) que el govern xinès començarà a rebaixar les mesures de confinament i activitat.
+
+- Itàlia porta un periode aproximat de 18 dies de creixement contínu des de que la corva es dispara. En el cas de Xina, aquest període va ser de aprox. 15 dies. Espanya porta aprox. 13 dies de creixement exponencial contínu.
+
+- Tant Itàlia com Espanya han superat a la Xina en nombre de nous casos, la qual cosa sembla -a priori- sorprenent tenint en compte que la Xina és un pais amb molt més nombre d'habitants que aquests paisos.
+
+També és interessant veure com evoluciona el rati d'infectats, definits com els infectats totals avui entre els infectats totals ahir. Veiem com Corea i Xina estan amb un rati de 1 o proper, que vol dir que el nombre d'infectats d'avui es pràcticament igual al nombre d'infectats d'ahir. Per tal de limitar l'expanció del coronavirus les mesures han d'anar encaminades a reduir aquest índex fins a 1. Espanya i Itàlia a dia 23 tenen índex de 1.25 i 1.14 respectivament. Es tracta d'un valor puntual, més endavant mirarem quin és aquest factor mitjançant la modelització de les dades.
+
+```{r, results='asis', echo= F, warning=F}
+data_filt %>%
+  ggplot(aes(x=factor(Data),y=Infect_rati,color=Pais))+
+  geom_point()+
+  theme(axis.text.x = element_text(angle = 90,
+                                   size = 5))
+```
+
+
+## 5. Què podem dir del nombre de morts?
+
+```{r, results='asis', echo= F}
+data_filt %>%
+  ggplot(aes(x=factor(Data),y=Morts_acu,color=Pais))+
+  geom_point()+
+  theme(axis.text.x = element_text(angle = 90,
+                                   size = 5))
+```
+
+```{r, results='asis', echo= F}
+data_filt %>%
+  ggplot(aes(x=factor(Data),y=Morts_Nou))+
+  geom_col(aes(fill=Pais))+
+  facet_wrap(~Pais)+
+  theme(axis.text.x = element_text(angle = 90,
+                                   size = 5))
+
+```
+
+Els anteriors gràfics mostren com:
+
+- Itàlia ha superat a Xina en  nombre de morts acumulats (dalt)
+- Com Espanya i Itàlia tenen un nombre de morts diaris major que a Xina (baix). 
+- Per la seva banda, Corea del Sud compta amb pocs casos de mort per coronavirus.
+
+
+```{r, echo=F}
+primer_infectat <- data_filt %>%
+  group_by(Pais) %>%
+  arrange(Data) %>%
+  dplyr::filter(Infect_acu != 0) %>%
+  slice(1, Data) %>%
+  mutate(Primera_infeccio = Data)%>%
+  ungroup()
+
+primer_mort <- data_filt %>%
+  group_by(Pais) %>%
+  arrange(Data) %>%
+  dplyr::filter(Morts_acu != 0) %>%
+  slice(1, Data) %>%
+  mutate(Primera_mort = Data)%>%
+  ungroup()
+```
+
+El temps que passa des que es confirma el primer cas fins que apareix el primer mort per coronavirus és força variable entre paisos: a Xina es donà al cap de 11 dies mentre que a Corea del Sud i Espanya ha de transcorre un més. Es tracta d'una dada que tampoc aporta massa informació.
+```{r, results='asis', echo= F}
+
+infect_mort<-merge(primer_infectat, primer_mort, by="Pais")%>%
+  select(Pais,Primera_infeccio,Primera_mort)%>%
+  mutate(Temps_mort=Primera_mort-Primera_infeccio)
+
+infect_mort%>%
+  kable()
+```
+
+Pel que fa al índex de mortalitat del coronavirus, definit com el total de morts dividit entre el total de casos, veiem com evoluciona amb el temps:
+
+- A Xina el rati s'ha estabilitzat entorn al 5 morts per cada 100 infectats
+- A Italia i Espanya el rati segueix un creixement lineal des de 1 fins al 9% aproximat a Italia i de 1 al 5% per a Espanya. De moment, no sembla que s'estabilitzi.
+- A Corea, l'index es situa entorn al 1%.
+
+```{r, results='asis', echo= F, warning=F}
+
+data_filt<-data_filt%>%
+  mutate(Mort_rati = Morts_acu/Infect_acu * 100)%>%
+  arrange(Data)
+
+
+data_filt%>%
+  select(Pais,Data,Mort_rati)%>%
+  ggplot(aes(x=factor(Data),y=Mort_rati,color=Pais))+
+  geom_point()+
+  theme(axis.text.x = element_text(angle = 90,
+                                   size = 5))
+  
+```
+
+
+## 6. Prediccions per al cas d'Espanya
+
+De l'apartat anterior se'n despren que Espanya encara es troba en una fase de creixement exponencial i encara no ha arribat al seu màxim. 
+
+A continuació crearem un model per als casos d'Espanya per tal de predir-ne el comportament en els pròxims dies. Per fer-ho, primer filtrarem els valors apartir del dia 25/02/2020 on els casos començen a ser rellevants. Al gràfic, veiem peró, que no és fins el dia 08/03/2020 que comença la fase de creixement exponencial de contagi.
+
+```{r,echo=F, results='asis'}
+spain <- data_filt%>%
+  filter(Pais == "Spain" & Data > '2020-02-25')%>%
+  mutate(Log_Infect_acu = log10(Infect_acu))%>%
+  select(-Pais)
+spain%>%
+  ggplot(aes(x = factor(Data), y= Infect_Nou ))+
+  geom_col(color="red", fill="red")+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 90,
+                                   size = 6))
+```
+
+
+## 6.1. Les mesures preses pel govern han resultat efectives?
+
+Anem a crear un model per als contagis a Espanya. Per fer-ho linearitzarem les dades, passant-ho a escala logaritmica. Ho repetirem dos cops, en un filtrarem per valors abans de l'aplicació de les mesures (16/03/20) i un altre per a totes les dades
+
+```{r}
+spain2<- spain%>%
+  filter(Data<'2020-03-16' & Data >'2020-02-25')
+
+formula <- y ~ x
+ggplot(spain2, aes(x = Data, y= Log_Infect_acu))+
+  geom_point(color="red")+
+  geom_smooth(method='lm', se= F)+
+  stat_poly_eq(aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")), label.x.npc = "right", label.y.npc = 0.15,formula = formula, parse = TRUE, size = 3)+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 90,
+                                   size = 6))
+```
+
+La grafica anterior demostra que el model lineal ajusta molt bé pels valors dels infectats - en base logaritmica - abans de l'entrada en funcionament de les mesures. La R^2 és del 99%, el que vol dir és que el model ens explica el 99% de la variable real i, per tant, és molt bon model. Caldria comprovar que no sobreajusti les dades, però no ho farem.
+
+
+```{r, echo=F, results='asis'}
+formula <- y ~ x
+ggplot(spain, aes(x = Data, y= Log_Infect_acu))+
+  geom_point(color="red")+
+  geom_smooth(method='lm', se= F)+
+  stat_poly_eq(aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")), label.x.npc = "right", label.y.npc = 0.15,formula = formula, parse = TRUE, size = 3)+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 90,
+                                   size = 6))
+```
+
+
+```{r, echo=F, results='asis'}
+spain2%>%
+  select(Data,Infect_Nou,Infect_acu,Log_Infect_acu)%>%
+  kable()
+
+```
+
+D'altra banda, a la taula anterior podem veure els infectats totals -en base logarítmica 10- abans de les mesures . Es pot veure que en menys d'una setmana (5-6 dies), el logarítme augmenta aproximadament en 1 respecte a la setmana anterior. Això significa que cada 5-6 dies el nombre d'infectats acumulats es multiplica per 10; lo qual implica que, si no es prenguessin mesures, cada setmana es multiplicaría per 10 el nombre de contagiats. De no fer res, acabríem el més de març amb 1.200.000 infectats! Incloem-hi, doncs, els resultats tenint en compte aquesta setmana de mesures (taula següent). 
+
+```{r, echo=F, results='asis'}
+spain%>%
+  select(Data,Infect_Nou,Infect_acu,Log_Infect_acu)%>%
+  kable()
+
+```
+
+Podem veure que en aquesta durant aquesta última setmana el logritme no ha pujat en +1. Això és una bona notícia: encara és aviat per a afirmar-ho però sembla que les mesures han alentit el contagi.
+
+Creem el model lineal. Tant la intersecció com el coeficient de la variable independent mostren valors de p-valor molt petits i, per tant, són significatives. 
+
+```{r, echo = F, warning=F}
+
+mod_spain <- lm(Log_Infect_acu~Data, spain2)
+summary(mod_spain)
+
+```
+
+Amb aquest model calcularem el factor de creixement que abans hem estimat com a x10 cada setmana
+
+```{r, echo = F}
+coef_data <- coef(mod_spain)[2]
+factor_spain <- 10^coef_data  #antilogaritme
+
+cat("El factor de creiexement a Espanya és: ", round(factor_spain,2),". És a dir, cada dia s'identifiquen ", round((factor_spain-1)*100,2),"% més casos que l'anterior. Quan aquest valor sigui igual a 1 el creixement s'estabilitzarà i quan sigui menor a 1 s'invertirà la tendencia ja que cada dia hi haurà menys contagiats que el dia anterior.")
+```
+
+Recordem que el model representa el nombre d'infectats en cas que no s'hagués actuat contra el coronavirus. Ara contrastarem aquest model amb les dades posteriors a l'entrada en funcionament de les mesures. La linea vermella representa el valors del model, mentre que la blava son els valors reals. Veiem com el model ajusta molt bé fins al dia 16 on entren en vigor les mesures i com, un cop passat, el model prediu més casos que els que realment hi han hagut. Per tant podem dir, doncs, que les mesures de confinament si que han servit per a estalviar-nos nous casos d'infectats, fent que el creixement exponencial sigui més lent.
+
+```{r, echo=F, results='asis'}
+train_data <- spain%>%
+  select(Data,Infect_acu)
+
+spain <- spain%>%
+  mutate(Infect_Pred_old = 10^predict(mod_spain,newdata =train_data))
+
+spain%>%
+  ggplot(aes(x=Data))+
+  geom_line(aes(y=Infect_acu), color="blue",size=1)+
+  geom_line(aes(y=Infect_Pred_old), color="red",size=1)
+```
+
+
+## 6.2. Com podem preveure que evolucioni?
+
+Ara crearem un nou model ajustat als valors actuals. El nou model presenta també valors de p-valor molt baixos, de manera que podem acceptar que els coeficients són significatius. Intentarem predir el comportament del contagi per als propers 15 dies
+
+```{r, echo = F, warning=F}
+# Si utilitzo els valors dels primers dies, el model no ajusta bé als ultims dies i es dispara. Creare el model a partir del 12/03 que es quan es comença a disparar
+
+spain3 <- spain%>% 
+  filter(Data>'2020-03-12')
+
+mod_spain_new <- lm(Log_Infect_acu~Data, spain3)
+summary(mod_spain_new)
+
+spain3 <- spain3%>%
+  mutate(Infect_Pred_acu = 10^predict(mod_spain_new,newdata =spain3))
+
+spain3%>%
+  ggplot(aes(x=Data))+
+  geom_point(aes(y=Infect_acu), color="blue",size=1)+
+  geom_line(aes(y=Infect_Pred_acu), color="red",size=1)
+
+```
+
+```{r,  echo = F, warning=F}
+inici <- as_date('2020-03-23')
+final <- inici+15
+
+spain_reduced <- spain%>%
+  select(Data, Infect_Nou, Infect_acu, Log_Infect_acu)
+
+prox_15 <- data.frame(Data= as_date(inici:final),
+                      Infect_Nou = NA,
+                      Infect_acu = NA,
+                      Log_Infect_acu = NA)
+
+spain_pred <- rbind(spain_reduced,prox_15)
+spain_pred <- spain_pred%>%
+  mutate(Infect_Pred_acu = 10^predict(mod_spain_new,newdata =spain_pred))%>%
+  select(Data, Infect_acu, Infect_Pred_acu)
+
+spain_pred$Infect_Pred_acu <- round(spain_pred$Infect_Pred_acu)
+
+kable(spain_pred)
+
+```
+
+El model ens diu que a final de més, si continuem en la fase exponencial, fregarem els 1.000.000 d'infectats. Certament és una situació que ens col.locaría pitjor que a Xina però també és molt possible que s'asoleixi a la fase d'estabilització abans del 1.000.000 d'infectats.
+
+Anem a predir en quin punt es pot estabilitzar el model. Per fer-ho ajustarem les dades a una Curva de Gompertz: aquesta curva s'utilitza per modelitzar creixements de població i es pot utilitzar per predir el comportament del COVID-19 (https://arxiv.org/ftp/arxiv/papers/2003/2003.05447.pdf). 
+
+```{r, echo= F, warning=F}
+spain_4 <- spain%>%
+  select(Data, Infect_acu)
+spain_4$Data <- c(1:length(spain_4$Data))
+
+inici2 <- last(spain_4$Data)+1
+final2 <- inici2+100
+
+
+prox_100 <- data.frame(Data= as_date(inici2:final2),
+                      Infect_acu = NA)
+spain_pred_100 <- rbind(spain_4,prox_100)
+
+alpha <- 1000
+beta <- 9.1618 
+k <- 0.1
+
+nls.gompertz <- nlsLM(spain_4$Infect_acu~alpha*exp(-beta*exp(-k*spain_4$Data)),
+                      data = spain_4, 
+                      start = list(alpha = alpha, beta = beta, k = k), 
+                      control = list(maxiter = 500))
+
+coef(nls.gompertz) 
+## alpha = 414201, beta = 13.57, k = 0.06
+## Now fit Geompertz model
+growth.gompertz <- growthmodels::gompertz(spain_4$Data, alpha = coef(nls.gompertz)[["alpha"]], beta = coef(nls.gompertz)[["beta"]], k = coef(nls.gompertz)[["k"]])
+growth.gompertz
+## Predict
+predict.gompertz <-growthmodels::gompertz(spain_pred_100$Data, alpha = coef(nls.gompertz)[["alpha"]], beta = coef(nls.gompertz)[["beta"]], k = coef(nls.gompertz)[["k"]])
+predict.gompertz
+
+data_f <- data.frame(spain_pred_100,predict.gompertz)
+
+inici3 <- first(spain$Data)
+final3 <- inici3+last(data_f$Data-1)
+
+data_f$Data <- as_date(inici3:final3)
+
+```
+
+```{r, echo= F, warning=F, results='asis'}
+
+ggplot(data_f, aes(x= Data))+
+  geom_line(aes(y=predict.gompertz),color="blue")+
+  geom_point(aes(y=Infect_acu), color="grey", alpha=0.6)
+```
+
+
+En l'anterior gràfic es pot apreciar que el punt d'establització es donarà a Espanya a l'entorn dels 400.000 infectats i es donarà a principis de Juny. Cal mencionar que aquest punt d'estabilització és molt més superior al de Xina que es situa sobre els 60.000-70.000. Això pot ser degut al fet que encara estem en una fase inicial del creixement exponencial i això afecta a les prediccions. Aplicarem el mateix model a Xina i, per equiparar-ho amb Espanya, l'entrenarem amb els valors dels primers dies de creixement exponencial.
+
+
+```{r,echo=F}
+
+china0 <- data_filt%>%
+  filter(Pais=="China")%>%
+  select(Data, Infect_acu)
+
+china2 <- china0
+china1 <- china0%>%
+  filter(Data< '2020-02-01')
+
+china1$Data <- c(1:length(china1$Data))
+china2$Data <- c(1:length(china2$Data))
+
+
+alpha <- 1000
+beta <- 9.1618 
+k <- 0.1
+
+nls.gompertz <- nlsLM(china1$Infect_acu~alpha*exp(-beta*exp(-k*china1$Data)),
+                      data = china1, 
+                      start = list(alpha = alpha, beta = beta, k = k), 
+                      control = list(maxiter = 500))
+
+coef(nls.gompertz) 
+## alpha = 414201, beta = 13.57, k = 0.06
+## Now fit Geompertz model
+growth.gompertz <- growthmodels::gompertz(china1$Data, alpha = coef(nls.gompertz)[["alpha"]], beta = coef(nls.gompertz)[["beta"]], k = coef(nls.gompertz)[["k"]])
+growth.gompertz
+## Predict
+predict.gompertz <-growthmodels::gompertz(china2$Data, alpha = coef(nls.gompertz)[["alpha"]], beta = coef(nls.gompertz)[["beta"]], k = coef(nls.gompertz)[["k"]])
+predict.gompertz
+
+data_f <- data.frame(china2,predict.gompertz)
+
+inici3 <- first(china0$Data)
+final3 <- inici3+last(data_f$Data-1)
+
+data_f$Data <- as_date(inici3:final3)
+
+```
+
+```{r}
+ggplot(data_f, aes(x= Data))+
+  geom_line(aes(y=predict.gompertz),color="blue")+
+  geom_point(aes(y=Infect_acu), color="grey", alpha=0.6)
+```
+
+Com podem veure, el model sobre estima els nombre total de casos a la Xina, de manera que podem pensar que en el cas d'Espanya també s'està sobreestimant. Vol dir això que el model de Gompertz no és adequat? La resposta és no, el model encara disposa de poques dades per a poder-lo entrenar, caldrà veure com evoluciona en els propers dies i ajustar-lo. De fet, si apliquem el model a la totalitat de les dades de Xina (grafica següent), veiem com presenta una estimació força acurada.
+
+```{r, echo=F,  warning=F}
+china0 <- data_filt%>%
+  filter(Pais=="China")%>%
+  select(Data, Infect_acu)
+
+china2 <- china0
+china1 <- china0%>%
+  filter(Data< '2020-03-22')
+
+china1$Data <- c(1:length(china1$Data))
+china2$Data <- c(1:length(china2$Data))
+
+
+alpha <- 1000
+beta <- 9.1618 
+k <- 0.1
+
+nls.gompertz <- nlsLM(china1$Infect_acu~alpha*exp(-beta*exp(-k*china1$Data)),
+                      data = china1, 
+                      start = list(alpha = alpha, beta = beta, k = k), 
+                      control = list(maxiter = 500))
+
+coef(nls.gompertz) 
+## alpha = 414201, beta = 13.57, k = 0.06
+## Now fit Geompertz model
+growth.gompertz <- growthmodels::gompertz(china1$Data, alpha = coef(nls.gompertz)[["alpha"]], beta = coef(nls.gompertz)[["beta"]], k = coef(nls.gompertz)[["k"]])
+growth.gompertz
+## Predict
+predict.gompertz <-growthmodels::gompertz(china2$Data, alpha = coef(nls.gompertz)[["alpha"]], beta = coef(nls.gompertz)[["beta"]], k = coef(nls.gompertz)[["k"]])
+predict.gompertz
+
+data_f <- data.frame(china2,predict.gompertz)
+
+inici3 <- first(china0$Data)
+final3 <- inici3+last(data_f$Data-1)
+
+data_f$Data <- as_date(inici3:final3)
+
+```
+
+```{r}
+ggplot(data_f, aes(x= Data))+
+  geom_line(aes(y=predict.gompertz),color="blue")+
+  geom_point(aes(y=Infect_acu), color="grey", alpha=0.6)
+```
+
+
+## 7. Conclusions
+
+Per concloure aquesta investigació, es pot dir:
+
+- Tant Espanya com Itàlia es troben encara en fase de creixement exponencial
+- Xina i Corea del Sur sembla que ja es troben en una fase d'estabilització i tenen controlat al virus.
+- Es sorprenen el cas de Corea del Sur, on els efectes del COVID-19 són mínims en comparació a la resta de paisos. Per saber com ho han fet: https://www.youtube.com/watch?v=4ESWLnxyZUo
+- Itàlia ens porta una setmana de ventatja, si es mante aquesta tendència, cal esperar que la fase d'estabilització es doni una setmana mes tard que a Itàlia
+- Sembla que la primera setmana de mesures a Espanya ha tingut el seu efecte i a realentitzat l'expansió del virus.
+- La corva de Gompertz ajusta i descriu força bé les etapes de creixement i expansió del virus, tal i com s'ha vist en el cas de Xina. Encara és massa aviat per utilitzar aquest model per predir quan s'estabilitzarà l'expansió a Espanya
+
+
+
+
