@@ -10,3 +10,5 @@ Els arxius inclouen:
 - Coronavirus19.Rmd : codi generat per al tractament i la modelització.
 - coronavirus.pdf: informe generat. Inclou comentaris, observacions i conclusions
 
+Recursos COVID-19:
+https://www.statsandr.com/blog/top-r-resources-on-covid-19-coronavirus/
